@@ -859,7 +859,9 @@ function crossfilter() {
         reduceSum: reduceSum,
         order: order,
         orderNatural: orderNatural,
-        size: size
+        size: size,
+        pivot: pivot,
+        idx: idx // allow returning objectid -> groupId index. usefull for pivot projections.  
       };
 
       var groups, // array of {key, value}
@@ -872,6 +874,7 @@ function crossfilter() {
           reduceAdd,
           reduceRemove,
           reduceInitial,
+          pivotGroups = [], //array of groups to project reduce functions to 
           update = crossfilter_null,
           reset = crossfilter_null,
           resetNeeded = true;
@@ -886,7 +889,17 @@ function crossfilter() {
 
       // Incorporate any existing data into the grouping.
       add(values, index, 0, n);
-
+      
+      // Return the groupIndex (used for perfoming pivot reduce function) 
+       function idx() {return groupIndex}
+       
+       function pivot() {
+           if (arguments.length < 1) return pivotGroups
+           pivotGroups = [].concat(arguments[0]);
+           resetNeeded = true;
+           return group
+       }
+       
       // Incorporates the specified new values into this group.
       // This function is responsible for updating groups and groupIndex.
       function add(newValues, newIndex, n0, n1) {
@@ -1007,7 +1020,7 @@ function crossfilter() {
              for (i = 0, n = removed.length; i < n; ++i) {
                 k = removed[i];
                 g = groups[groupIndex[k]];
-                g.value = reduceRemove(g.value, data[k]);
+                g.value = reduceRemove(g.value, data[k],k,pivotGroups);
                  for (ii = k, nn = groupIndex.length; ii < nn; ++ii) {
                     groupIndex[ii] = groupIndex[ii + 1]
                  } 
@@ -1020,7 +1033,7 @@ function crossfilter() {
         for (i = 0, n = added.length; i < n; ++i) {
           if (!(filters[k = added[i]] & zero)) {
             g = groups[groupIndex[k]];
-            g.value = reduceAdd(g.value, data[k]);
+            g.value = reduceAdd(g.value, data[k],k, pivotGroups);
           }
         }
      
@@ -1028,7 +1041,7 @@ function crossfilter() {
         for (i = 0, n = removed.length; i < n; ++i) {
           if ((filters[k = removed[i]] & zero) === filterOne) {
             g = groups[groupIndex[k]];
-            g.value = reduceRemove(g.value, data[k]);
+            g.value = reduceRemove(g.value, data[k],k, pivotGroups);
             
           }
         }
@@ -1047,14 +1060,14 @@ function crossfilter() {
         // Add the added values.
         for (i = 0, n = added.length; i < n; ++i) {
           if (!(filters[k = added[i]] & zero)) {
-            g.value = reduceAdd(g.value, data[k]);
+            g.value = reduceAdd(g.value, data[k],k, pivotGroups);
           }
         }
 
         // Remove the removed values.
         for (i = 0, n = removed.length; i < n; ++i) {
           if ((filters[k = removed[i]] & zero) === filterOne) {
-            g.value = reduceRemove(g.value, data[k]);
+            g.value = reduceRemove(g.value, data[k],k, pivotGroups);
           }
         }
       }
@@ -1067,14 +1080,14 @@ function crossfilter() {
 
         // Reset all group values.
         for (i = 0; i < k; ++i) {
-          groups[i].value = reduceInitial();
+          groups[i].value = reduceInitial(pivotGroups);
         }
 
         // Add any selected records.
         for (i = 0; i < n; ++i) {
           if (!(filters[i] & zero)) {
             g = groups[groupIndex[i]];
-            g.value = reduceAdd(g.value, data[i]);
+            g.value = reduceAdd(g.value, data[i],i, pivotGroups);
           }
         }
       }
@@ -1086,12 +1099,12 @@ function crossfilter() {
             g = groups[0];
 
         // Reset the singleton group values.
-        g.value = reduceInitial();
+        g.value = reduceInitial(pivotGroups);
 
         // Add any selected records.
         for (i = 0; i < n; ++i) {
           if (!(filters[i] & zero)) {
-            g.value = reduceAdd(g.value, data[i]);
+            g.value = reduceAdd(g.value, data[i], i, pivotGroups);
           }
         }
       }
@@ -1214,19 +1227,19 @@ function crossfilter() {
       // Add the added values.
       for (i = 0, n = added.length; i < n; ++i) {
         if (!filters[k = added[i]]) {
-          reduceValue = reduceAdd(reduceValue, data[k]);
+          reduceValue = reduceAdd(reduceValue, data[k],k);
         }
       }
     if(forceRemove  && (filterOne == 1)) {  // this is triggered when we remove records from this crossfliter
          for (i = 0, n = removed.length; i < n; ++i) {
-            reduceValue = reduceRemove(reduceValue, data[ removed[i]]);
+            reduceValue = reduceRemove(reduceValue, data[ removed[i]],removed[i] );
          }
         return
     }
       // Remove the removed values.
       for (i = 0, n = removed.length; i < n; ++i) {
         if (filters[k = removed[i]] === filterOne) {
-          reduceValue = reduceRemove(reduceValue, data[k]);
+          reduceValue = reduceRemove(reduceValue, data[k], k);
         }
       }
     }
@@ -1239,7 +1252,7 @@ function crossfilter() {
 
       for (i = 0; i < n; ++i) {
         if (!filters[i]) {
-          reduceValue = reduceAdd(reduceValue, data[i]);
+          reduceValue = reduceAdd(reduceValue, data[i], i);
         }
       }
     }

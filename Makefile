@@ -1,9 +1,11 @@
-JS_TESTER = ./node_modules/vows/bin/vows
-JS_COMPILER = ./node_modules/uglify-js/bin/uglifyjs
+#JS_TESTER = ./node_modules/vows/bin/vows
+#JS_COMPILER = ./node_modules/uglify-js/bin/uglifyjs
+DIR = ~/Projects/DAV/system/js/crossfilter
 
 .PHONY: test benchmark
 
-all: crossfilter.min.js package.json
+#all: crossfilter.min.js package.json
+all: package.json
 
 crossfilter.js: \
 	src/version.js \
@@ -22,9 +24,9 @@ crossfilter.js: \
 	src/crossfilter.js \
 	Makefile
 
-%.min.js: %.js Makefile
-	@rm -f $@
-	$(JS_COMPILER) < $< > $@
+#%.min.js: %.js Makefile
+#	@rm -f $@
+#	$(JS_COMPILER) < $< > $@
 
 %.js:
 	@rm -f $@
@@ -38,11 +40,14 @@ package.json: crossfilter.js src/package.js
 	node src/package.js > $@
 	@chmod a-w $@
 
-clean:
-	rm -f crossfilter.js crossfilter.min.js package.json
+#clean:
+#	rm -f crossfilter.js crossfilter.min.js package.json
 
-test: all
-	@$(JS_TESTER)
+#test: all
+#	@$(JS_TESTER)
 
 benchmark: all
 	@node test/benchmark.js
+	
+#COPY TO APP:
+$(shell cp -fr crossfilter.js $(DIR))	
