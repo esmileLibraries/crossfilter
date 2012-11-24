@@ -1,8 +1,7 @@
-exports.crossfilter = crossfilter;
-
 function crossfilter() {
   var crossfilter = {
     add: add,
+    remove: remove,
     dimension: dimension,
     groupAll: groupAll,
     size: size
@@ -15,7 +14,9 @@ function crossfilter() {
       filters = crossfilter_array8(0), // M bits per record; 1 is filtered out
       filterListeners = [], // when the filters change
       dataListeners = []; // when data is added
-
+      removeListeners = []; // when data is removed
+      positions = []; // for resetting dimension positions 
+       
   // Adds the specified new records to this crossfilter.
   function add(newData) {
     var n0 = n,
@@ -33,6 +34,25 @@ function crossfilter() {
 
     return crossfilter;
   }
+  // remove data from this crossfilter
+  function remove(records) {
+    records = [].concat(records) // make sure we have an array
+    var ll = records.length,
+        ret = [],
+        i, pos;
+    
+     for (i = 0; i < ll; ++i) {
+          if((pos = data.indexOf(records[i])) > -1) {
+              n--;
+              (ret[0] && (pos > ret[0])) ? ret.splice(0,0,pos) :ret.push(pos)
+          }    
+       }
+     ll = ret.length;
+     removeListeners.forEach(function(l) { l(ret); });
+     for (i = 0; i < ll; ++i) {data.splice(ret[i], 1);}
+ 
+    return crossfilter;
+  }
 
   // Adds a new dimension with the specified value accessor function.
   function dimension(value) {
@@ -44,10 +64,13 @@ function crossfilter() {
       top: top,
       bottom: bottom,
       group: group,
-      groupAll: groupAll
+      groupAll: groupAll,
+      remove: remove // remove this dimension (as opposed to remove data from this crossfilter)
     };
 
-    var one = 1 << m++, // bit mask, e.g., 00001000
+var position = m++,
+      one = 1 << position, // bit mask, e.g., 00001000
+// var one = 1 << m++, // bit mask, e.g., 00001000
         zero = ~one, // inverted one, e.g., 11110111
         values, // sorted, cached array
         index, // value rank ↦ object id
@@ -59,20 +82,51 @@ function crossfilter() {
         lo0 = 0,
         hi0 = 0,
         union = false,
-        resetNeeded = false;
+        resetNeeded = false,
+        dimRemoveListeners = []; // track listeners for dimension removal;
 
     // Updating a dimension is a two-stage process. First, we must update the
     // associated filters for the newly-added records. Once all dimensions have
     // updated their filters, the groups are notified to update.
     dataListeners.unshift(preAdd);
     dataListeners.push(postAdd);
-
+    removeListeners.push(removeData);
+    dimRemoveListeners.push(preAdd);
+    dimRemoveListeners.push(postAdd);
+    
     // Incorporate any existing data into this dimension, and make sure that the
     // filter bitset is wide enough to handle the new dimension.
     if (m > M) filters = crossfilter_arrayWiden(filters, M <<= 1);
     preAdd(data, 0, n);
     postAdd(data, 0, n);
-
+   
+    function removeData(pos) {
+      var le = pos.length,
+            l = n + le,
+            toRem = [],
+            shift = 0, 
+            current, i, ii, k, bounds; 
+    filterListeners.forEach(function(l) { l(one, [], pos, false, true); });
+     for (i = 0; i < le; ++i) {
+      for (ii = 0; ii < ( l - i); ++ii) {
+        current = pos[i];
+        if(!shift && (index[ii] == current)) {
+            shift = 1;
+            toRem[ii> toRem[0] ? 'unshift' : 'push'](ii)
+            }
+        index[ii] = index[ii + shift];   
+        }
+        shift = 0
+     }        
+     
+      for (i = 0; i < toRem.length; ++i) {values.splice(toRem[i],1)};
+      index = index.subarray(0,n);
+      bounds = refilter(values); 
+      lo1 = bounds[0], hi1 = bounds[1];   
+      toRemoveIndex = null;   
+      
+    }
+     
     // Incorporates the specified new records into this dimension.
     // This function is responsible for updating filters, values, and index.
     function preAdd(newData, n0, n1) {
@@ -291,7 +345,9 @@ function crossfilter() {
         reduceSum: reduceSum,
         order: order,
         orderNatural: orderNatural,
-        size: size
+        size: size,
+        pivot: pivot,
+        idx: idx // allow returning objectid -> groupId index. usefull for pivot projections.  
       };
 
       var groups, // array of {key, value}
@@ -304,6 +360,7 @@ function crossfilter() {
           reduceAdd,
           reduceRemove,
           reduceInitial,
+          pivotGroups = [], //array of groups to project reduce functions to 
           update = crossfilter_null,
           reset = crossfilter_null,
           resetNeeded = true;
@@ -314,11 +371,22 @@ function crossfilter() {
       // that it can update the associated reduce values. It must also listen to
       // the parent dimension for when data is added, and compute new keys.
       filterListeners.push(update);
+      dimRemoveListeners.push(update);
       indexListeners.push(add);
 
       // Incorporate any existing data into the grouping.
       add(values, index, 0, n);
-
+      
+      // Return the groupIndex (used for perfoming pivot reduce function) 
+       function idx() {return groupIndex}
+       
+       function pivot() {
+           if (arguments.length < 1) return pivotGroups
+           pivotGroups = [].concat(arguments[0]);
+           resetNeeded = true;
+           return group
+       }
+       
       // Incorporates the specified new values into this group.
       // This function is responsible for updating groups and groupIndex.
       function add(newValues, newIndex, n0, n1) {
@@ -416,6 +484,7 @@ function crossfilter() {
           groupIndex = null;
         }
         filterListeners[j] = update;
+        dimRemoveListeners.push(update);
 
         // Count the number of added groups,
         // and widen the group index as needed.
@@ -430,27 +499,38 @@ function crossfilter() {
 
       // Reduces the specified selected or deselected records.
       // This function is only used when the cardinality is greater than 1.
-      function updateMany(filterOne, added, removed, reset) {
-        if (filterOne === one || (resetNeeded = resetNeeded || reset)) return;
-
-        var i,
+      function updateMany(filterOne, added, removed, reset, forceRemove) {
+        var i, ii,
             k,
-            n,
+            n, nn,
             g;
-
+        if(forceRemove && (filterOne === one)) { // this is triggered when we remove records from this crossfliter
+             for (i = 0, n = removed.length; i < n; ++i) {
+                k = removed[i];
+                g = groups[groupIndex[k]];
+                g.value = reduceRemove(g.value, data[k],k,pivotGroups);
+                 for (ii = k, nn = groupIndex.length; ii < nn; ++ii) {
+                    groupIndex[ii] = groupIndex[ii + 1]
+                 } 
+             }
+            groupIndex = groupIndex.subarray(0, nn-n) 
+            return
+        }
+        if (filterOne === one || (resetNeeded = resetNeeded || reset)) return;
         // Add the added values.
         for (i = 0, n = added.length; i < n; ++i) {
           if (!(filters[k = added[i]] & zero)) {
             g = groups[groupIndex[k]];
-            g.value = reduceAdd(g.value, data[k]);
+            g.value = reduceAdd(g.value, data[k],k, pivotGroups);
           }
         }
-
+     
         // Remove the removed values.
         for (i = 0, n = removed.length; i < n; ++i) {
           if ((filters[k = removed[i]] & zero) === filterOne) {
             g = groups[groupIndex[k]];
-            g.value = reduceRemove(g.value, data[k]);
+            g.value = reduceRemove(g.value, data[k],k, pivotGroups);
+            
           }
         }
       }
@@ -468,14 +548,14 @@ function crossfilter() {
         // Add the added values.
         for (i = 0, n = added.length; i < n; ++i) {
           if (!(filters[k = added[i]] & zero)) {
-            g.value = reduceAdd(g.value, data[k]);
+            g.value = reduceAdd(g.value, data[k],k, pivotGroups);
           }
         }
 
         // Remove the removed values.
         for (i = 0, n = removed.length; i < n; ++i) {
           if ((filters[k = removed[i]] & zero) === filterOne) {
-            g.value = reduceRemove(g.value, data[k]);
+            g.value = reduceRemove(g.value, data[k],k, pivotGroups);
           }
         }
       }
@@ -488,14 +568,14 @@ function crossfilter() {
 
         // Reset all group values.
         for (i = 0; i < k; ++i) {
-          groups[i].value = reduceInitial();
+          groups[i].value = reduceInitial(pivotGroups);
         }
 
         // Add any selected records.
         for (i = 0; i < n; ++i) {
           if (!(filters[i] & zero)) {
             g = groups[groupIndex[i]];
-            g.value = reduceAdd(g.value, data[i]);
+            g.value = reduceAdd(g.value, data[i],i, pivotGroups);
           }
         }
       }
@@ -507,12 +587,12 @@ function crossfilter() {
             g = groups[0];
 
         // Reset the singleton group values.
-        g.value = reduceInitial();
+        g.value = reduceInitial(pivotGroups);
 
         // Add any selected records.
         for (i = 0; i < n; ++i) {
           if (!(filters[i] & zero)) {
-            g.value = reduceAdd(g.value, data[i]);
+            g.value = reduceAdd(g.value, data[i], i, pivotGroups);
           }
         }
       }
@@ -582,8 +662,41 @@ function crossfilter() {
       return g;
     }
 
+        // Remove this dimension.
+    function remove() {
+      filterAll();
+      var before = position ? -1 >>> 32 - position : 0, // mask for positions before this one
+          after = -1 << position, // mask for positions after this one
+          x,
+          removed = [];
+      for (var i = 0; i < n; i++) {
+        filters[i] = (x = filters[i]) & before | x >>> 1 & after;
+        removed[i] = i;
+      }
+      filterListeners.forEach(function(l) { l(one, [], removed); });
+      positions.splice(position, 1);
+      positions.slice(position).forEach(function(setPosition, i) {
+        setPosition(position + i);
+      });
+      removeListeners.forEach(function(l) {
+        var i = dataListeners.indexOf(l);
+        if (i >= 0) dataListeners.splice(i, 1);
+        i = filterListeners.indexOf(l);
+        if (i >= 0) filterListeners.splice(i, 1);
+      });
+      m--;
+      return dimension;
+    }
+   
+   positions.push(function(i) {
+      one = 1 << (position = i);
+      zero = ~one;
+    }); 
+    
     return dimension;
   }
+
+
 
   // A convenience method for groupAll on a dummy dimension.
   // This implementation can be optimized since it is always cardinality 1.
@@ -625,24 +738,29 @@ function crossfilter() {
     }
 
     // Reduces the specified selected or deselected records.
-    function update(filterOne, added, removed, reset) {
+    function update(filterOne, added, removed, reset, forceRemove) {
       var i,
           k,
           n;
-
+  //    if(toRemoveIndex) {removed = toRemoveIndex}  
       if (resetNeeded = resetNeeded || reset) return;
 
       // Add the added values.
       for (i = 0, n = added.length; i < n; ++i) {
         if (!filters[k = added[i]]) {
-          reduceValue = reduceAdd(reduceValue, data[k]);
+          reduceValue = reduceAdd(reduceValue, data[k],k);
         }
       }
-
+    if(forceRemove  && (filterOne == 1)) {  // this is triggered when we remove records from this crossfliter
+         for (i = 0, n = removed.length; i < n; ++i) {
+            reduceValue = reduceRemove(reduceValue, data[ removed[i]],removed[i] );
+         }
+        return
+    }
       // Remove the removed values.
       for (i = 0, n = removed.length; i < n; ++i) {
         if (filters[k = removed[i]] === filterOne) {
-          reduceValue = reduceRemove(reduceValue, data[k]);
+          reduceValue = reduceRemove(reduceValue, data[k], k);
         }
       }
     }
@@ -655,7 +773,7 @@ function crossfilter() {
 
       for (i = 0; i < n; ++i) {
         if (!filters[i]) {
-          reduceValue = reduceAdd(reduceValue, data[i]);
+          reduceValue = reduceAdd(reduceValue, data[i], i);
         }
       }
     }

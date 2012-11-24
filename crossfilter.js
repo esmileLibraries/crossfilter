@@ -1,4 +1,3 @@
-(function(exports){
 crossfilter.version = "1.1.0";
 function crossfilter_identity(d) {
   return d;
@@ -449,12 +448,9 @@ if (typeof Uint8Array !== "undefined") {
   crossfilter_array32 = function(n) { return new Uint32Array(n); };
 
   crossfilter_arrayLengthen = function(array, length) {
-  if(length > array.length) { // make sure we really need to lengthen it - mecessary otherwise cast error while removeing records 
     var copy = new array.constructor(length);
     copy.set(array);
     return copy;
-    }
-  return array  
   };
 
   crossfilter_arrayWiden = function(array, width) {
@@ -516,8 +512,6 @@ function crossfilter_reduceSubtract(f) {
     return p - f(v);
   };
 }
-exports.crossfilter = crossfilter;
-
 function crossfilter() {
   var crossfilter = {
     add: add,
@@ -535,7 +529,7 @@ function crossfilter() {
       filterListeners = [], // when the filters change
       dataListeners = []; // when data is added
       removeListeners = []; // when data is removed
-      // postRemoveListeners = []; // when data is removed
+      positions = []; // for resetting dimension positions 
        
   // Adds the specified new records to this crossfilter.
   function add(newData) {
@@ -584,10 +578,13 @@ function crossfilter() {
       top: top,
       bottom: bottom,
       group: group,
-      groupAll: groupAll
+      groupAll: groupAll,
+      remove: remove // remove this dimension (as opposed to remove data from this crossfilter)
     };
 
-    var one = 1 << m++, // bit mask, e.g., 00001000
+var position = m++,
+      one = 1 << position, // bit mask, e.g., 00001000
+// var one = 1 << m++, // bit mask, e.g., 00001000
         zero = ~one, // inverted one, e.g., 11110111
         values, // sorted, cached array
         index, // value rank ↦ object id
@@ -599,14 +596,17 @@ function crossfilter() {
         lo0 = 0,
         hi0 = 0,
         union = false,
-        resetNeeded = false;
+        resetNeeded = false,
+        dimRemoveListeners = []; // track listeners for dimension removal;
 
     // Updating a dimension is a two-stage process. First, we must update the
     // associated filters for the newly-added records. Once all dimensions have
     // updated their filters, the groups are notified to update.
     dataListeners.unshift(preAdd);
     dataListeners.push(postAdd);
-    removeListeners.push(remove);
+    removeListeners.push(removeData);
+    dimRemoveListeners.push(preAdd);
+    dimRemoveListeners.push(postAdd);
     
     // Incorporate any existing data into this dimension, and make sure that the
     // filter bitset is wide enough to handle the new dimension.
@@ -614,7 +614,7 @@ function crossfilter() {
     preAdd(data, 0, n);
     postAdd(data, 0, n);
    
-    function remove(pos) {
+    function removeData(pos) {
       var le = pos.length,
             l = n + le,
             toRem = [],
@@ -885,6 +885,7 @@ function crossfilter() {
       // that it can update the associated reduce values. It must also listen to
       // the parent dimension for when data is added, and compute new keys.
       filterListeners.push(update);
+      dimRemoveListeners.push(update);
       indexListeners.push(add);
 
       // Incorporate any existing data into the grouping.
@@ -997,6 +998,7 @@ function crossfilter() {
           groupIndex = null;
         }
         filterListeners[j] = update;
+        dimRemoveListeners.push(update);
 
         // Count the number of added groups,
         // and widen the group index as needed.
@@ -1174,8 +1176,41 @@ function crossfilter() {
       return g;
     }
 
+        // Remove this dimension.
+    function remove() {
+      filterAll();
+      var before = position ? -1 >>> 32 - position : 0, // mask for positions before this one
+          after = -1 << position, // mask for positions after this one
+          x,
+          removed = [];
+      for (var i = 0; i < n; i++) {
+        filters[i] = (x = filters[i]) & before | x >>> 1 & after;
+        removed[i] = i;
+      }
+      filterListeners.forEach(function(l) { l(one, [], removed); });
+      positions.splice(position, 1);
+      positions.slice(position).forEach(function(setPosition, i) {
+        setPosition(position + i);
+      });
+      removeListeners.forEach(function(l) {
+        var i = dataListeners.indexOf(l);
+        if (i >= 0) dataListeners.splice(i, 1);
+        i = filterListeners.indexOf(l);
+        if (i >= 0) filterListeners.splice(i, 1);
+      });
+      m--;
+      return dimension;
+    }
+   
+   positions.push(function(i) {
+      one = 1 << (position = i);
+      zero = ~one;
+    }); 
+    
     return dimension;
   }
+
+
 
   // A convenience method for groupAll on a dummy dimension.
   // This implementation can be optimized since it is always cardinality 1.
@@ -1317,4 +1352,3 @@ function crossfilter_capacity(w) {
       ? 0x10000
       : 0x100000000;
 }
-})(this);
